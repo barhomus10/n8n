@@ -100,8 +100,10 @@ async def execute_task(task_id: str):
         except:
             pass
 
-@app.get("/", response_class=HTMLResponse)
-def home():
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
+def home(request: Request):
+    if request.method == "HEAD":
+        return HTMLResponse(content="", status_code=200)
     return """
 <!DOCTYPE html>
 <html lang="es">
@@ -188,8 +190,10 @@ async function createTask(){
 </html>
     """
 
-@app.get("/health")
-def health():
+@app.api_route("/health", methods=["GET", "HEAD"])
+def health(request: Request = None):
+    if request and request.method == "HEAD":
+        return JSONResponse(content={}, status_code=200)
     return {"status": "ok", "time": now_iso(), "tasks": len(tasks), "version": "1.0.0"}
 
 # --- Chat ---

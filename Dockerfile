@@ -1,8 +1,6 @@
 FROM python:3.11-slim
 
 WORKDIR /app
-
-# Evita buffering y .pyc
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
@@ -15,5 +13,5 @@ COPY . .
 
 EXPOSE 8000
 
-# Producción: 2 workers, sin reload
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Render usa $PORT, solo 1 worker para instancia free (evita Child died)
+CMD uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info
