@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: arena-agent-api
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: API_KEY
+        value: arena-demo-key-2025
+        sync: false
+      - key: PORT
+        value: 8000
+    autoDeploy: false
