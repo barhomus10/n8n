@@ -41,26 +41,39 @@ class VisionRequest(BaseModel): image_url:Optional[str]=None; image_base64:Optio
 class RAGUpload(BaseModel): text:str; metadata:Optional[Dict[str,Any]]=None; id:Optional[str]=None
 class RAGQuery(BaseModel): query:str; top_k:Optional[int]=3
 
-# ========== REAL VIDEO GEN (reused) ==========
+# ========== REAL VIDEO GEN - TXT-TO-VIDEO ANIMADO CON IMÁGENES REALES ==========
 def generate_real_video(task_id: str, prompt: str, options: dict):
+    """TXT-TO-VIDEO REAL: genera imágenes con modelo txt-to-image y las anima con ffmpeg + gTTS + subtítulos palabra por palabra"""
     try:
         from gtts import gTTS
     except ImportError:
         subprocess.run(["pip","install","-q","gTTS"], check=False)
         from gtts import gTTS
+    import httpx, random, urllib.parse
     out_mp4 = DATA_DIR / f"{task_id}.mp4"
     tmp_audio = DATA_DIR / f"{task_id}_voice.mp3"
     tmp_srt = DATA_DIR / f"{task_id}.srt"
-    tmp_bg = DATA_DIR / f"{task_id}_bg.mp4"
+    tmp_concat = DATA_DIR / f"{task_id}_concat.txt"
+    tmp_slideshow = DATA_DIR / f"{task_id}_slideshow.mp4"
+
+    # 1. Audio TTS
     tts_text = prompt[:800]
     if len(tts_text) < 20: tts_text = "Video generado por Arena Agent. " + prompt
-    tts = gTTS(text=tts_text, lang=options.get("lang","es") if isinstance(options,dict) else "es", slow=False)
-    tts.save(str(tmp_audio))
+    lang = options.get("lang","es") if isinstance(options,dict) else "es"
+    try:
+        tts = gTTS(text=tts_text, lang=lang, slow=False)
+        tts.save(str(tmp_audio))
+    except Exception as e:
+        # fallback: silencio + texto
+        subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono:d=10","-t","10",str(tmp_audio)], capture_output=True)
+        tts_text = prompt  # para SRT igual
     try:
         probe = subprocess.run(["ffprobe","-v","error","-show_entries","format=duration","-of","default=noprint_wrappers=1:nokey=1", str(tmp_audio)], capture_output=True, text=True)
         duration = float(probe.stdout.strip())
-    except: duration = 12.0
-    duration = max(6, min(duration, 90))
+    except: duration = 15.0
+    duration = max(8, min(duration, 90))
+
+    # 2. SRT palabra por palabra
     words = tts_text.split()
     total_chars = sum(len(w) for w in words) or 1
     per_char = duration / total_chars
@@ -74,17 +87,122 @@ def generate_real_video(task_id: str, prompt: str, options: dict):
         t+=d
     tmp_srt.write_text("\n".join(srt_lines), encoding="utf-8")
     font_size = int(options.get("fontSize",20) if isinstance(options,dict) else 20)
+    estilo = options.get("estilo","realista") if isinstance(options,dict) else "realista"
     formato = options.get("formato","1:1") if isinstance(options,dict) else "1:1"
     w,h = (1080,1920) if formato=="9:16" else (1920,1080) if formato=="16:9" else (1080,1080)
-    subprocess.run(["ffmpeg","-y","-f","lavfi","-i",f"color=c=0x0a1628:s={w}x{h}:d={duration}:r=30","-vf",f"drawbox=x=0:y=0:w={w}:h={h}:color=0x0a1628:t=fill,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='Arena Agent':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2-200:box=1:boxcolor=black@0.5:boxborderw=10","-pix_fmt","yuv420p","-t",str(duration),str(tmp_bg)], check=True, capture_output=True)
+
+    # 3. Generar imágenes con modelo txt-to-image REAL (Pollinations + fallback)
+    # Creamos 5 escenas a partir del prompt
+    base_prompt = prompt[:120]
+    # Si el prompt es sobre cerebro/generosidad, creamos escenas temáticas; si no, genéricas
+    if any(k in prompt.lower() for k in ["cerebro","generosidad","neurona","ciencia"]):
+        scene_prompts = [
+            f"{base_prompt}, human brain glowing neural networks, blue orange bokeh, scientific cinematic, 8k",
+            f"{base_prompt}, neuroscience laboratory MRI scanner volunteers, documentary realistic",
+            f"anatomical transparent head showing temporo-parietal junction glowing gold, medical illustration",
+            f"{base_prompt}, hands helping each other with neural network overlay, hopeful warm light",
+            f"{base_prompt}, diverse friends sharing and laughing at sunset, inspirational cinematic"
+        ]
+    else:
+        # Genérico: divide prompt en 5 variaciones
+        scene_prompts = [f"{base_prompt}, scene {i+1}, {estilo}, cinematic, high detail 8k, vibrant" for i in range(5)]
+
+    num_scenes = len(scene_prompts)
+    per_scene = duration / num_scenes
+    img_paths = []
+    for idx, sp in enumerate(scene_prompts):
+        img_path = DATA_DIR / f"{task_id}_img{idx}.jpg"
+        # Intenta descargar de Pollinations (txt-to-image real, sin API key)
+        # Usa seed aleatorio para variedad
+        seed = random.randint(1, 999999)
+        # Pollinations: https://image.pollinations.ai/p/{prompt}?width=1024&height=1024&seed=...&model=flux
+        encoded = urllib.parse.quote(sp)
+        url = f"https://image.pollinations.ai/p/{encoded}?width={w}&height={h}&seed={seed}&model=flux&enhance=true&nologo=true"
+        success=False
+        for attempt in range(2):
+            try:
+                with httpx.Client(timeout=20) as client:
+                    r = client.get(url, follow_redirects=True)
+                    if r.status_code==200 and len(r.content) > 8000:
+                        img_path.write_bytes(r.content)
+                        success=True
+                        break
+            except: pass
+            # fallback URL sin model param
+            try:
+                url2 = f"https://image.pollinations.ai/p/{encoded}?width={w}&height={h}&seed={seed}"
+                with httpx.Client(timeout=20) as client:
+                    r = client.get(url2, follow_redirects=True)
+                    if r.status_code==200 and len(r.content) > 8000:
+                        img_path.write_bytes(r.content)
+                        success=True
+                        break
+            except: pass
+        if not success or not img_path.exists():
+            # Fallback: genera imagen placeholder con PIL + texto
+            try:
+                from PIL import Image, ImageDraw, ImageFont
+                img = Image.new('RGB', (w,h), color=(10,22,40))
+                d = ImageDraw.Draw(img)
+                try: font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
+                except: font = ImageFont.load_default()
+                d.text((50,h//2-100), textwrap.fill(sp[:80], width=30), fill=(255,255,255), font=font)
+                d.text((50,h//2+80), f"Escena {idx+1}/{num_scenes}", fill=(180,220,255), font=font)
+                img.save(img_path, "JPEG")
+            except:
+                # último fallback: color sólido con ffmpeg
+                subprocess.run(["ffmpeg","-y","-f","lavfi","-i",f"color=c=0x0a1628:s={w}x{h}:d=1:r=30","-vframes","1",str(img_path)], capture_output=True)
+        img_paths.append(img_path)
+
+    # 4. Crear slideshow animado (Ken Burns sutil + concat)
+    # Crea concat demuxer file
+    with open(tmp_concat, "w") as f:
+        for p in img_paths:
+            f.write(f"file '{p}'\n")
+            f.write(f"duration {per_scene}\n")
+        # último frame necesita repetirse para concat
+        f.write(f"file '{img_paths[-1]}'\n")
+    # Genera slideshow con zoompan sutil y escala a tamaño final
+    # Usa: scale + zoompan para animar cada imagen
+    # Para simplicidad, usamos concat + fps + scale/crop con zoompan por imagen vía filter_complex
+    # Aquí hacemos un slideshow simple con crossfade suave: primero genera video sin zoom, luego añade zoompan en un segundo paso sería complejo.
+    # Implementamos un slideshow con zoom lento usando cada imagen con zoompan y luego concat.
+    # Para no complicar, hacemos un video base con concat y luego aplicamos un ligero zoom global + subtítulos
+    subprocess.run([
+        "ffmpeg","-y",
+        "-f","concat","-safe","0","-i",str(tmp_concat),
+        "-vf",f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps=30,zoompan=z='min(zoom+0.0012,1.35)':d=700:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={w}x{h}:fps=30",
+        "-t",str(duration),
+        "-pix_fmt","yuv420p",
+        str(tmp_slideshow)
+    ], check=True, capture_output=True)
+
+    # 5. Música de fondo
     musica_path = Path("musica_fondo.mp3")
     if not musica_path.exists():
         musica_path = Path("/tmp/arena_videos/musica_fondo.mp3")
         if not musica_path.exists():
             subprocess.run(["ffmpeg","-y","-f","lavfi","-i",f"anullsrc=r=44100:cl=stereo:d={duration}","-t",str(duration),str(musica_path)], capture_output=True)
+
     filter_v = f"subtitles={tmp_srt}:force_style='FontName=DejaVu Sans,FontSize={font_size},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=3,Outline=1,Shadow=1,Alignment=2,MarginV=45,Bold=0'"
-    subprocess.run(["ffmpeg","-y","-i",str(tmp_bg),"-i",str(tmp_audio),"-i",str(musica_path),"-filter_complex",f"[0:v]{filter_v}[v];[1:a]volume=1.0[a1];[2:a]volume=0.07,aloop=loop=1:size=2e9,atrim=duration={duration}[a2];[a1][a2]amix=inputs=2:duration=shortest[aout]","-map","[v]","-map","[aout]","-c:v","libx264","-c:a","aac","-pix_fmt","yuv420p","-shortest",str(out_mp4)], check=True, capture_output=True)
-    try: tmp_bg.unlink(missing_ok=True); tmp_audio.unlink(missing_ok=True)
+
+    subprocess.run([
+        "ffmpeg","-y",
+        "-i",str(tmp_slideshow),
+        "-i",str(tmp_audio),
+        "-i",str(musica_path),
+        "-filter_complex",
+        f"[0:v]{filter_v}[v];[1:a]volume=1.0[a1];[2:a]volume=0.07,aloop=loop=1:size=2e9,atrim=duration={duration}[a2];[a1][a2]amix=inputs=2:duration=shortest[aout]",
+        "-map","[v]","-map","[aout]",
+        "-c:v","libx264","-c:a","aac","-pix_fmt","yuv420p","-shortest", str(out_mp4)
+    ], check=True, capture_output=True)
+
+    # Limpieza
+    try:
+        for p in img_paths: p.unlink(missing_ok=True)
+        tmp_concat.unlink(missing_ok=True)
+        tmp_slideshow.unlink(missing_ok=True)
+        tmp_audio.unlink(missing_ok=True)
     except: pass
     return str(out_mp4)
 
