@@ -209,6 +209,12 @@ def generate_real_video(task_id: str, prompt: str, options: dict):
 async def execute_task(task_id:str):
     task=tasks[task_id]
     try:
+        # VIDEO TXT-TO-VIDEO: siempre delegado a worker Arena REAL (generate_image/generate_speech), NO usa Pollinations
+        if task["type"]=="video":
+            task["status"]="queued"; task["progress"]=5; task["updated_at"]=now_iso()
+            task["result"]={"message":"En cola para worker Arena REAL (generate_image/gTTS) - Pollinations desactivado","queued":True, "arena": True}
+            # El worker Arena (en sandbox o laptop con modelos) hará polling y subirá el MP4 vía POST /result
+            return
         task["status"]="processing"; task["progress"]=10; task["updated_at"]=now_iso()
         await asyncio.sleep(0.3)
         ttype=task["type"]
@@ -459,6 +465,20 @@ def download(task_id:str):
             media = "video/mp4" if ext==".mp4" else "image/jpeg" if ext==".jpg" else "audio/mpeg"
             return FileResponse(str(p), media_type=media, filename=f"{task_id}{ext}")
     return JSONResponse(t["result"])
+
+@app.post("/api/v1/tasks/{task_id}/result")
+async def upload_result(task_id: str, file: UploadFile = File(...), message: Optional[str] = Form(None), api_key=Depends(verify_api_key)):
+    if task_id not in tasks: raise HTTPException(404,"Tarea no encontrada")
+    # Guarda el archivo subido por el worker Arena REAL
+    ext = Path(file.filename).suffix or ".mp4"
+    dest = DATA_DIR / f"{task_id}{ext}"
+    content = await file.read()
+    dest.write_bytes(content)
+    tasks[task_id]["status"]="completed"
+    tasks[task_id]["progress"]=100
+    tasks[task_id]["result"]={"message": message or "Video Arena REAL con generate_image/generate_speech","files":[str(dest)],"download_url":f"/api/v1/tasks/{task_id}/download","preview_url":f"/api/v1/tasks/{task_id}/download","arena":True, "bytes": len(content)}
+    tasks[task_id]["updated_at"]=now_iso()
+    return {"ok":True, "task_id":task_id, "bytes": len(content), "download_url": f"/api/v1/tasks/{task_id}/download"}
 
 @app.post("/api/v1/webhook/test")
 async def test_webhook(request: Request):
