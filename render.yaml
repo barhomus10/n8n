@@ -11,4 +11,4 @@ services:
         sync: false
       - key: PORT
         value: 8000
-    autoDeploy: false
+    autoDeploy: true

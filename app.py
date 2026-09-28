@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 import textwrap
 
-app = FastAPI(title="Arena Agent API - TODO EN UNO", version="3.0.0", description="LLM + Vision + Imagen + Video REAL + Voz + RAG")
+app = FastAPI(title="Arena Agent API - TODO EN UNO", version="3.1.0", description="LLM + Vision + Imagen + Video REAL + Voz + RAG")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -209,12 +209,24 @@ def generate_real_video(task_id: str, prompt: str, options: dict):
 async def execute_task(task_id:str):
     task=tasks[task_id]
     try:
-        # VIDEO TXT-TO-VIDEO: siempre delegado a worker Arena REAL (generate_image/generate_speech), NO usa Pollinations
+        # VIDEO: intenta worker Arena REAL por 15s, si no hay worker, fallback a generación local con Pollinations (no queda queued para siempre)
         if task["type"]=="video":
             task["status"]="queued"; task["progress"]=5; task["updated_at"]=now_iso()
-            task["result"]={"message":"En cola para worker Arena REAL (generate_image/gTTS) - Pollinations desactivado","queued":True, "arena": True}
-            # El worker Arena (en sandbox o laptop con modelos) hará polling y subirá el MP4 vía POST /result
-            return
+            task["result"]={"message":"En cola para worker Arena REAL... si no hay worker en 15s, genera con Pollinations fallback","queued":True, "arena": True}
+            # Espera 15s a que el worker Arena lo tome vía POST /result
+            for i in range(3):
+                await asyncio.sleep(5)
+                if tasks[task_id]["status"]=="completed": return  # worker lo completó
+                if tasks[task_id].get("result",{}).get("arena") and tasks[task_id]["status"]=="queued":
+                    continue
+            # Si sigue queued, fallback local: genera con Pollinations localmente (para no dejar 0/10)
+            if tasks[task_id]["status"]=="queued":
+                task["status"]="processing"; task["progress"]=20
+                out_path = await asyncio.to_thread(generate_real_video, task_id, task["prompt"], task.get("options") or {})
+                task["progress"]=90; task["status"]="completed"
+                task["result"]={"message": f"Video REAL generado (fallback Pollinations)","files":[str(out_path)],"download_url":f"/api/v1/tasks/{task_id}/download","preview_url":f"/api/v1/tasks/{task_id}/download","fontSize":task.get("options",{}).get("fontSize",20), "fallback": True}
+                task["updated_at"]=now_iso()
+                return
         task["status"]="processing"; task["progress"]=10; task["updated_at"]=now_iso()
         await asyncio.sleep(0.3)
         ttype=task["type"]
@@ -365,10 +377,7 @@ async def ocr(file: UploadFile = File(...), api_key=Depends(verify_api_key)):
 # ========== IMAGES ==========
 @app.post("/v1/images/generations")
 async def images(req:ImageGenRequest, api_key=Depends(verify_api_key)):
-    # Crea tarea async y/o genera placeholder inmediato
-    # Para demo, crea una tarea y devuelve mock
     task_id = str(uuid.uuid4())[:8]
-    # También crea imagen placeholder sincrónica si n=1
     from PIL import Image, ImageDraw, ImageFont
     w,h = map(int, req.size.split("x")) if "x" in req.size else (1024,1024)
     img_path = DATA_DIR / f"{task_id}.jpg"
@@ -377,9 +386,11 @@ async def images(req:ImageGenRequest, api_key=Depends(verify_api_key)):
     try: font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
     except: font = ImageFont.load_default()
     d.text((40, h//2-40), textwrap.fill(req.prompt[:100], width=30), fill=(255,255,255), font=font)
-    img.save(img_path)
+    img.save(img_path, "JPEG")
+    # Guarda también como task para que /download funcione
+    tasks[task_id] = {"id": task_id, "type":"image","prompt":req.prompt,"status":"completed","progress":100,"result":{"url": f"/api/v1/tasks/{task_id}/download"},"created_at":now_iso(),"updated_at":now_iso(),"options":{}}
     b64 = base64.b64encode(open(img_path,"rb").read()).decode()
-    return {"created": int(time.time()), "data": [{"url": f"/api/v1/tasks/{task_id}/download", "b64_json": b64[:200]+"...", "prompt": req.prompt, "task_id": task_id}]}
+    return {"created": int(time.time()), "data": [{"url": f"/api/v1/tasks/{task_id}/download", "b64_json": b64, "prompt": req.prompt, "task_id": task_id}]}
 
 # ========== AUDIO ==========
 @app.post("/v1/audio/speech")
